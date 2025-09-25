@@ -7,4 +7,5 @@ crewai-tools[mcp]>=0.43.0
 mcp>=1.6.0
 pydantic>=2.0.0
 requests>=2.25.0
+pillow>=10.4.0
 anyio>=3.0.0

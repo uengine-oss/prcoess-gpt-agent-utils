@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "process-gpt-agent-utils"
-version = "0.1.0"
+version = "0.1.2"
 description = "ProcessGPT Agent Utilities - 도구 로더, 지식 관리, 이벤트 로깅, 데이터베이스 유틸리티"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -29,6 +29,7 @@ dependencies = [
   "mcp>=1.6.0",
   "pydantic>=2.0.0",
   "requests>=2.25.0",
+  "pillow>=10.4.0",    
   "anyio>=3.0.0",
   "a2a-sdk>=0.3.0",
 ]

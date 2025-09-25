@@ -11,7 +11,9 @@ from mcp.client.stdio import StdioServerParameters
 from crewai_tools import MCPServerAdapter
 
 from .knowledge_manager import Mem0Tool, MementoTool
-from .human_query_tool import HumanQueryTool
+from .human_query_tool import HumanQueryTool\
+
+from processgpt_agent_utils.utils.context_manager import proc_inst_id_var, task_id_var, users_email_var
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +107,9 @@ class SafeToolLoader:
 
     def _load_memento(self) -> List:
         try:
+            if not self.tenant_id:
+                logger.info("⏭️ memento 도구 로드 생략: tenant_id 없음")
+                return []
             return [MementoTool(tenant_id=self.tenant_id)]
         except Exception as e:
             logger.error("❌ memento 도구 로드 실패 | tenant_id=%s err=%s", self.tenant_id, str(e), exc_info=True)
@@ -112,13 +117,19 @@ class SafeToolLoader:
 
     def _load_human_asked(self) -> List:
         try:
-            # HumanQueryTool은 네가 이미 init 파라미터 버전으로 교체한 상태 사용
+            if not self.tenant_id:
+                logger.info("⏭️ human_asked 도구 로드 생략: tenant_id 없음")
+                return []
+            if not self.agent_name:
+                logger.info("⏭️ human_asked 도구 로드 생략: agent_name 없음")
+                return []
+
             return [HumanQueryTool(
-                proc_inst_id="",
-                task_id="",
+                proc_inst_id=proc_inst_id_var.get(),
+                task_id=task_id_var.get(),
                 tenant_id=self.tenant_id,
                 agent_name=self.agent_name,
-                user_ids_csv=None
+                user_ids_csv=users_email_var.get(),
             )]
         except Exception as e:
             logger.error("❌ human_asked 도구 로드 실패 | tenant_id=%s user_id=%s err=%s", self.tenant_id, self.user_id, str(e), exc_info=True)

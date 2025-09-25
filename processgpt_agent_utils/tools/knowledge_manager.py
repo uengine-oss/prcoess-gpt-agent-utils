@@ -109,7 +109,8 @@ class Mem0Tool(BaseTool):
         if not query:
             return "검색할 쿼리를 입력해주세요."
         if not self._user_id:
-            return "개인지식 검색 비활성화: user_id 없음"
+            logger.error("❌ 개인지식 검색 실패 | user_id=%s", self._user_id)
+            raise ValueError("mem0 requires user_id")
 
         try:
             logger.info("🔍 개인지식 검색 시작 | user_id=%s, query=%s", self._user_id, query)

@@ -159,6 +159,7 @@ class HumanQueryTool(BaseTool):
     # -----------------------------------------------------------------
     def _wait_for_response(self, job_id: str, timeout_sec: int = 180, poll_interval_sec: int = 5) -> str:
         deadline = time.time() + timeout_sec
+        error_count = 0
 
         while time.time() < deadline:
             try:
@@ -170,9 +171,13 @@ class HumanQueryTool(BaseTool):
                         logger.info("🙋 사람 응답 수신 | job_id=%s", job_id)
                         return answer
                     return json.dumps(data, ensure_ascii=False)
+                error_count = 0  # 성공 시 에러 카운트 리셋
             except Exception as e:
+                logger.error("💥 응답 폴링 오류 | job_id=%s err=%s", job_id, str(e), exc_info=True)
+                error_count += 1
+                if error_count >= 3:
+                    raise RuntimeError("human_asked polling aborted after 3 consecutive errors") from e
                 logger.info("⏳ 응답 대기 중... (job_id=%s, err=%s)", job_id, str(e)[:120])
-                # 폴링 중 오류는 무시하고 계속 시도
             
             time.sleep(poll_interval_sec)
 
