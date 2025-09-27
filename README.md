@@ -109,7 +109,7 @@ pip install -e ".[dev]"
 ### 릴리스
 ```bash
 # Linux/Mac
-./release.sh 0.1.1
+./release.sh 0.1.4
 
 # Windows
 .\release.ps1 -Version 0.1.1
