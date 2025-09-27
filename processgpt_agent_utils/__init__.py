@@ -12,7 +12,7 @@ __email__ = "team@processgpt.io"
 from .tools.safe_tool_loader import SafeToolLoader
 from .tools.knowledge_manager import Mem0Tool, MementoTool
 from .tools.human_query_tool import HumanQueryTool
-from .utils.database import initialize_db, fetch_human_response, save_notification, save_event
+from .utils.database import initialize_db, fetch_human_response, save_notification
 from .utils.context_manager import set_context, reset_context, get_context_snapshot
 from .utils.crew_event_logger import CrewAIEventLogger, CrewConfigManager
 

@@ -25,7 +25,7 @@ except ImportError:  # 구버전
 from .context_manager import task_id_var, proc_inst_id_var, crew_type_var
 
 # database 저장 함수 import
-from .database import save_event
+from .database import save_event_sync, initialize_db
 
 
 class CrewAIEventLogger:
@@ -38,7 +38,16 @@ class CrewAIEventLogger:
         - 동기 메서드이며 내부에서 asyncio.run(...)으로 비동기 저장 1회 수행
         - 모든 예외는 상위로 전파
         """
+        logger.info("📨 CrewAI 이벤트 수신 시작 | event_class=%s", event.__class__.__name__ if event else "None")
+        
         try:
+            # DB 초기화 확인 및 실행
+            try:
+                initialize_db()
+            except Exception as db_e:
+                logger.error("❌ DB 초기화 실패, 이벤트 저장 건너뜀 | err=%s", str(db_e), exc_info=True)
+                raise
+
             event_type = self._extract_event_type(event)
             # 지원 타입만 처리
             if event_type not in ("task_started", "task_completed", "tool_usage_started", "tool_usage_finished"):
@@ -52,25 +61,21 @@ class CrewAIEventLogger:
             proc_inst_id = proc_inst_id_var.get()
             crew_type = crew_type_var.get()
 
-            event_id = asyncio.run(
-                save_event(
-                    job_id=job_id,
-                    todo_id=todo_id,
-                    proc_inst_id=proc_inst_id,
-                    crew_type=crew_type,
-                    data=data,
-                    event_type=event_type,
-                    status=None,
-                )
+            # DB 저장
+            event_id = save_event_sync(
+                job_id=job_id,
+                todo_id=todo_id,
+                proc_inst_id=proc_inst_id,
+                crew_type=crew_type,
+                data=data,
+                event_type=event_type,
+                status=None,
             )
-            logger.info(
-                "✅ 이벤트 저장: id=%s job_id=%s type=%s crew_type=%s todo_id=%s proc_inst_id=%s",
-                event_id, job_id, event_type, str(crew_type), str(todo_id), str(proc_inst_id)
-            )
+            logger.info("✅ 이벤트 DB 저장 완료 | event_id=%s job_id=%s type=%s crew_type=%s todo_id=%s proc_inst_id=%s",
+                event_id, job_id, event_type, str(crew_type), str(todo_id), str(proc_inst_id))
 
         except Exception as e:
-            logger.error("❌ on_event 실패: %s", e, exc_info=True)
-            # 경계에서 예외 전파
+            logger.error("❌ CrewAI 이벤트 처리 실패 | event_class=%s err=%s", event.__class__.__name__ if event else "None", str(e), exc_info=True)
             raise
 
     # --------- 헬퍼(가독성 유지용 최소) ---------
@@ -83,7 +88,8 @@ class CrewAIEventLogger:
             if hasattr(event, "job_id"):
                 return str(getattr(event, "job_id"))
         except Exception as e:
-            logger.warning("⚠️ job_id 추출 경고: %s", str(e), exc_info=True)
+            logger.warning("⚠️ job_id 추출 중 예외 발생 | err=%s", str(e), exc_info=True)
+        logger.warning("⚠️ job_id 추출 실패 - 기본값 사용 | job_id=unknown")
         return "unknown"
 
     def _extract_event_type(self, event: Any) -> str:
@@ -91,7 +97,7 @@ class CrewAIEventLogger:
             if hasattr(event, "type") and isinstance(event.type, str):
                 return event.type
         except Exception as e:
-            logger.debug("이벤트 타입 추출 실패 (기본값 사용): %s", str(e))
+            logger.debug("⚠️ 이벤트 타입 속성 접근 실패 | err=%s", str(e))
             pass
         name = event.__class__.__name__.lower()
         if "taskstarted" in name:
@@ -102,6 +108,8 @@ class CrewAIEventLogger:
             return "tool_usage_started"
         if "toolusagefinished" in name:
             return "tool_usage_finished"
+        
+        logger.warning("⚠️ 알 수 없는 이벤트 타입 | class_name=%s event_type=unknown", name)
         return "unknown"
 
     def _extract_data(self, event: Any, event_type: str) -> Dict[str, Any]:
@@ -141,10 +149,11 @@ class CrewAIEventLogger:
                 query = args.get("query") if isinstance(args, dict) else None
                 return {"tool_name": tool_name, "query": query, "args": args}
 
+            logger.warning("⚠️ 처리되지 않는 이벤트 타입 | event_type=%s", event_type)
             return {"info": f"Unhandled event type: {event_type}"}
 
         except Exception as e:
-            logger.error("❌ 데이터 추출 실패: %s", str(e), exc_info=True)
+            logger.error("❌ 이벤트 데이터 추출 실패 | event_type=%s err=%s", event_type, str(e), exc_info=True)
             raise
 
     # --------- 단순 유틸 ---------
@@ -156,7 +165,7 @@ class CrewAIEventLogger:
         try:
             return json.loads(value)
         except Exception as e:
-            logger.debug("JSON 파싱 실패 (원본 반환): %s", str(e))
+            logger.debug("⚠️ JSON 파싱 실패 (원본 반환) | err=%s", str(e))
             return value
 
     def _format_plans_md(self, plans: List[Dict[str, Any]]) -> str:
@@ -179,20 +188,23 @@ class CrewAIEventLogger:
 
 
 class CrewConfigManager:
-    """CrewAI 설정 관리자"""
-    
+    """글로벌 CrewAI 이벤트 리스너 등록 매니저"""
+    _registered = False
+
     def __init__(self):
         self.logger = CrewAIEventLogger()
-        logger.info("🔧 CrewConfigManager 초기화 완료")
-    
-    def setup_crew_logging(self, crew_instance):
-        """Crew 인스턴스에 이벤트 로깅 설정"""
-        try:
-            if hasattr(crew_instance, 'events_bus'):
-                crew_instance.events_bus.subscribe(self.logger.on_event)
-                logger.info("✅ Crew 이벤트 로깅 설정 완료")
-            else:
-                logger.warning("⚠️ Crew 인스턴스에 events_bus가 없습니다")
-        except Exception as e:
-            logger.error("❌ Crew 로깅 설정 실패: %s", str(e), exc_info=True)
-            raise
+        logger.info("✅ CrewConfigManager 초기화 완료")
+        
+        # 한번만 리스너 등록
+        if not CrewConfigManager._registered:
+            try:
+                bus = CrewAIEventsBus()
+                for evt in (TaskStartedEvent, TaskCompletedEvent, ToolUsageStartedEvent, ToolUsageFinishedEvent):
+                    bus.on(evt)(lambda source, event, logger=self.logger: logger.on_event(event, source))
+                CrewConfigManager._registered = True
+                logger.info("✅ CrewAI 이벤트 리스너 등록 완료 | registered_events=4")
+            except Exception as e:
+                logger.error("❌ CrewAI 이벤트 리스너 등록 실패 | err=%s", str(e), exc_info=True)
+                raise
+        else:
+            logger.info("⏭️ CrewAI 이벤트 리스너 이미 등록됨 - 생략")

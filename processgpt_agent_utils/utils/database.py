@@ -246,3 +246,61 @@ async def save_notification(
         logger.error("❌ 알림저장오류: %s", str(e), exc_info=e)
         raise
 
+
+def save_event_sync(
+    *,
+    job_id: str,
+    todo_id: Optional[str] = None,
+    proc_inst_id: Optional[str] = None,
+    crew_type: Optional[str] = None,
+    data: Dict[str, Any],
+    event_type: Optional[str] = None,
+    status: Optional[str] = None,
+) -> str:
+    """
+    동기 버전 save_event - 새로운 이벤트 루프에서 실행
+    CrewAI 이벤트 리스너에서 사용하기 위한 동기 래퍼
+    """
+    import threading
+    import queue
+    
+    result_queue = queue.Queue()
+    
+    def run_async():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            result = loop.run_until_complete(
+                save_event(
+                    job_id=job_id,
+                    todo_id=todo_id,
+                    proc_inst_id=proc_inst_id,
+                    crew_type=crew_type,
+                    data=data,
+                    event_type=event_type,
+                    status=status,
+                )
+            )
+            result_queue.put(('success', result))
+        except Exception as e:
+            result_queue.put(('error', e))
+        finally:
+            loop.close()
+    
+    thread = threading.Thread(target=run_async)
+    thread.start()
+    thread.join(timeout=10)  # 10초 타임아웃
+    
+    if thread.is_alive():
+        logger.error("❌ save_event_sync 타임아웃")
+        raise TimeoutError("save_event_sync 타임아웃")
+    
+    if result_queue.empty():
+        logger.error("❌ save_event_sync 결과 없음")
+        raise RuntimeError("save_event_sync 결과 없음")
+    
+    status, result = result_queue.get()
+    if status == 'error':
+        raise result
+    return result
+

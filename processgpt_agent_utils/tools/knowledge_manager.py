@@ -87,7 +87,7 @@ class Mem0Tool(BaseTool):
         self._user_id = user_id
         self._namespace = user_id
         self._memory = self._initialize_memory()
-        logger.info("🧠 Mem0Tool 초기화 완료 | user_id=%s, namespace=%s", self._user_id, self._namespace)
+        logger.info("\n\n✅ Mem0Tool 초기화 완료 | user_id=%s, namespace=%s", self._user_id, self._namespace)
 
     def _initialize_memory(self) -> Memory:
         """Memory 인스턴스 초기화 - 에이전트별"""
@@ -106,10 +106,13 @@ class Mem0Tool(BaseTool):
 
     def _run(self, query: str) -> str:
         """지식 검색 및 결과 반환 - 에이전트별 메모리에서"""
+        logger.info("\n\n🔍 개인지식 검색 시작 | user_id=%s", self._user_id)
+        
         if not query:
+            logger.warning("⚠️ 개인지식 검색 실패: 빈 쿼리")
             return "검색할 쿼리를 입력해주세요."
         if not self._user_id:
-            logger.error("❌ 개인지식 검색 실패 | user_id=%s", self._user_id)
+            logger.error("❌ 개인지식 검색 실패: user_id 없음 | user_id=%s", self._user_id)
             raise ValueError("mem0 requires user_id")
 
         try:
@@ -125,14 +128,14 @@ class Mem0Tool(BaseTool):
                 filtered_hits = hits_sorted[:MIN_RESULTS]
             hits = filtered_hits
 
-            logger.info("📊 검색 결과: %d개 (임계값: %.2f)", len(hits), THRESHOLD)
+            logger.info("📊 개인지식 검색 결과: %d개 (임계값: %.2f) | user_id=%s", len(hits), THRESHOLD, self._user_id)
             if not hits:
+                logger.info("📭 개인지식 검색 결과 없음 | user_id=%s query=%s", self._user_id, query)
                 return f"'{query}'에 대한 개인 지식이 없습니다."
 
             return self._format_results(hits)
 
         except Exception as e:
-            # 상세 로깅 후 상위로 전파
             logger.error("❌ 개인지식 검색 실패 | user_id=%s query=%s err=%s", self._user_id, query, str(e), exc_info=True)
             raise
 
@@ -177,9 +180,11 @@ class MementoTool(BaseTool):
     def __init__(self, tenant_id: str = "localhost", **kwargs):
         super().__init__(**kwargs)
         self._tenant_id = tenant_id
-        logger.info("🔒 MementoTool 초기화 완료 | tenant_id=%s", self._tenant_id)
+        logger.info("\n\n✅ MementoTool 초기화 완료 | tenant_id=%s", self._tenant_id)
 
     def _run(self, query: str) -> str:
+        logger.info("\n\n🔍 사내문서 검색 시작 | tenant_id=%s", self._tenant_id)
+        
         try:
             logger.info("🔍 사내문서 검색 시작 | tenant_id=%s, query=%s", self._tenant_id, query)
             resp = requests.post(
@@ -192,6 +197,7 @@ class MementoTool(BaseTool):
             docs = data.get("response", [])
             logger.info("📄 사내문서 검색 결과: %d개", len(docs))
             if not docs:
+                logger.info("📭 사내문서 검색 결과 없음 | tenant_id=%s query=%s", self._tenant_id, query)
                 return f"테넌트 '{self._tenant_id}'에서 '{query}' 검색 결과가 없습니다."
 
             results = []
@@ -202,9 +208,10 @@ class MementoTool(BaseTool):
                 content = doc.get("page_content", "")
                 results.append(f"📄 파일: {fname} (청크 #{idx})\n내용: {content}\n---")
 
-            return f"테넌트 '{self._tenant_id}'에서 '{query}' 검색 결과:\n\n" + "\n".join(results)
+            formatted_result = f"테넌트 '{self._tenant_id}'에서 '{query}' 검색 결과:\n\n" + "\n".join(results)
+            logger.info("✅ 사내문서 검색 완료 | tenant_id=%s", self._tenant_id)
+            return formatted_result
 
         except Exception as e:
             logger.error("❌ 사내문서 검색 실패 | tenant_id=%s query=%s err=%s", self._tenant_id, query, str(e), exc_info=True)
-            # 상위로 전파
             raise

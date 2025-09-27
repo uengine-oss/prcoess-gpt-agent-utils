@@ -100,8 +100,12 @@ class HumanQueryTool(BaseTool):
         self._agent_name = agent_name
         self._user_ids_csv = user_ids_csv
 
+        logger.info("\n\n✅ HumanQueryTool 초기화 완료 | proc_inst_id=%s task_id=%s tenant_id=%s agent_name=%s user_ids_csv=%s", proc_inst_id, task_id, tenant_id, agent_name, user_ids_csv)
+
     # CrewAI Tool 규약: 동기 실행
     def _run(self, role: str, text: str, type: str = "text", options: Optional[List[str]] = None) -> str:
+        logger.info("\n\n👤 사용자 확인 요청 시작 | role=%s type=%s", role, type)
+        
         # 1) 컨텍스트 정보 가져오기
         ctx = get_context_snapshot()
         crew_type = ctx.get("crew_type")
@@ -126,9 +130,9 @@ class HumanQueryTool(BaseTool):
                 data=payload,
                 event_type="human_asked",
             ))
-            logger.info("📨 human_asked 이벤트 저장 완료 | proc=%s task=%s job_id=%s", self._proc_inst_id, self._task_id, job_id)
+            logger.info("✅ 사용자 확인 이벤트 DB 저장 완료 | proc=%s task=%s job_id=%s", self._proc_inst_id, self._task_id, job_id)
         except Exception as e:
-            logger.error("💥 human_asked 이벤트 저장 실패 | proc=%s task=%s job_id=%s err=%s", self._proc_inst_id, self._task_id, job_id, str(e), exc_info=True)
+            logger.error("❌ 사용자 확인 이벤트 DB 저장 실패 | proc=%s task=%s job_id=%s err=%s", self._proc_inst_id, self._task_id, job_id, str(e), exc_info=True)
             raise
 
         # 5) 알림 저장 (있으면)
@@ -143,15 +147,17 @@ class HumanQueryTool(BaseTool):
                     url=f"/todolist/{self._task_id}" if self._task_id else None,
                     from_user_id=self._agent_name,
                 ))
-                logger.info("🔔 알림 저장 완료 | user_ids_csv=%s", self._user_ids_csv)
+                logger.info("✅ 사용자 알림 저장 완료 | user_ids_csv=%s", self._user_ids_csv)
             else:
-                logger.info("⏭️ 알림 저장 생략: user_ids_csv 비어있음")
+                logger.info("⏭️ 사용자 알림 저장 생략: user_ids_csv 비어있음")
         except Exception as e:
-            logger.error("💥 알림 저장 실패 | user_ids_csv=%s err=%s", self._user_ids_csv, str(e), exc_info=True)
+            logger.error("❌ 사용자 알림 저장 실패 | user_ids_csv=%s err=%s", self._user_ids_csv, str(e), exc_info=True)
             raise
 
         # 6) DB에서 사람 응답 폴링
+        logger.info("\n\n⏳ 사용자 응답 대기 시작 | job_id=%s", job_id)
         answer = self._wait_for_response(job_id)
+        logger.info("✅ 사용자 응답 수신 완료 | job_id=%s answer_length=%d", job_id, len(answer) if answer else 0)
         return answer
 
     # -----------------------------------------------------------------
@@ -168,18 +174,19 @@ class HumanQueryTool(BaseTool):
                     data = (event.get("data") or {})
                     answer = data.get("answer")
                     if isinstance(answer, str):
-                        logger.info("🙋 사람 응답 수신 | job_id=%s", job_id)
+                        logger.info("✅ 사용자 응답 수신 성공 | job_id=%s", job_id)
                         return answer
                     return json.dumps(data, ensure_ascii=False)
                 error_count = 0  # 성공 시 에러 카운트 리셋
             except Exception as e:
-                logger.error("💥 응답 폴링 오류 | job_id=%s err=%s", job_id, str(e), exc_info=True)
+                logger.error("❌ 사용자 응답 폴링 오류 | job_id=%s err=%s", job_id, str(e), exc_info=True)
                 error_count += 1
                 if error_count >= 3:
+                    logger.error("💥 사용자 응답 폴링 중단 | job_id=%s 연속 오류 3회", job_id)
                     raise RuntimeError("human_asked polling aborted after 3 consecutive errors") from e
-                logger.info("⏳ 응답 대기 중... (job_id=%s, err=%s)", job_id, str(e)[:120])
+                logger.warning("⚠️ 사용자 응답 폴링 재시도 | job_id=%s error_count=%d", job_id, error_count)
             
             time.sleep(poll_interval_sec)
 
-        logger.warning("⌛ 사용자 미응답 타임아웃 | job_id=%s", job_id)
+        logger.warning("⏰ 사용자 응답 타임아웃 | job_id=%s timeout=%ds", job_id, timeout_sec)
         return "사용자 미응답 거절"
