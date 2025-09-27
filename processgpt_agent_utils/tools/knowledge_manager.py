@@ -116,7 +116,6 @@ class Mem0Tool(BaseTool):
             raise ValueError("mem0 requires user_id")
 
         try:
-            logger.info("🔍 개인지식 검색 시작 | user_id=%s, query=%s", self._user_id, query)
             results = self._memory.search(query, user_id=self._user_id)
             hits = results.get("results", [])
 
@@ -130,13 +129,13 @@ class Mem0Tool(BaseTool):
 
             logger.info("📊 개인지식 검색 결과: %d개 (임계값: %.2f) | user_id=%s", len(hits), THRESHOLD, self._user_id)
             if not hits:
-                logger.info("📭 개인지식 검색 결과 없음 | user_id=%s query=%s", self._user_id, query)
+                logger.info("📭 개인지식 검색 결과 없음 | user_id=%s", self._user_id)
                 return f"'{query}'에 대한 개인 지식이 없습니다."
 
             return self._format_results(hits)
 
         except Exception as e:
-            logger.error("❌ 개인지식 검색 실패 | user_id=%s query=%s err=%s", self._user_id, query, str(e), exc_info=True)
+            logger.error("❌ 개인지식 검색 실패 | user_id=%s err=%s", self._user_id, str(e), exc_info=True)
             raise
 
     def _format_results(self, hits: List[dict]) -> str:
