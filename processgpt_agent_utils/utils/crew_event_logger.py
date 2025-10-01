@@ -1,11 +1,32 @@
 from __future__ import annotations
 
 import json
+import re
 import logging
 import asyncio
 from typing import Any, Dict, Optional, List
 
 logger = logging.getLogger(__name__)
+
+# --- minimal guardrail helpers (작게 추가: 가독성 목적) ---
+_JSON_BLOCK = re.compile(r"(\{[\s\S]*\}|\[[\s\S]*\])", re.DOTALL)
+
+def _looks_like_json(text: str) -> bool:
+    t = text.strip()
+    return t.startswith("{") or t.startswith("[")
+
+def _strip_code_fence(s: str) -> str:
+    s = s.strip()
+    if s.startswith("```"):
+        # ```json ... ``` 또는 ``` ... ``` 제거
+        s = re.sub(r"^```(?:json)?\s*|\s*```$", "", s, flags=re.DOTALL).strip()
+    return s
+
+def _extract_first_json_block(s: str) -> str:
+    if _looks_like_json(s):
+        return s.strip()
+    m = _JSON_BLOCK.search(s)
+    return m.group(1).strip() if m else s
 
 # CrewAI 이벤트 임포트 (신/구 버전 호환)
 try:
@@ -158,15 +179,48 @@ class CrewAIEventLogger:
 
     # --------- 단순 유틸 ---------
     def _safe_json(self, value: Any) -> Any:
+        """문자열 결과를 견고하게 JSON으로 파싱(최대 2회 디코딩).
+        - 1차: 그대로 json.loads
+        - 실패 시: 코드펜스 제거 + 첫 JSON 블록 추출 후 재시도
+        - 각 단계에서 결과가 'JSON 문자열'이면 추가로 1회만 더 파싱
+        - 여전히 실패면 원문 반환(보수적)
+        """
         if value is None or isinstance(value, (dict, list)):
             return value
         if not isinstance(value, str):
             return value
-        try:
-            return json.loads(value)
-        except Exception as e:
-            logger.debug("⚠️ JSON 파싱 실패 (원본 반환) | err=%s", str(e))
-            return value
+
+        def _loads_once(s: str):
+            try:
+                return True, json.loads(s)
+            except Exception:
+                return False, None
+
+        def _maybe_decode_nested(obj: Any) -> Any:
+            # 결과가 "JSON을 담은 문자열"이면 거기까지만 1회 더 파싱
+            if isinstance(obj, str):
+                s2 = obj.strip()
+                if _looks_like_json(s2):
+                    ok2, obj2 = _loads_once(s2)
+                    if ok2:
+                        return obj2
+            return obj
+
+        # 1) 있는 그대로 1차 시도
+        ok, obj = _loads_once(value)
+        if ok:
+            return _maybe_decode_nested(obj)
+
+        # 2) 정리 후 재시도(코드펜스 제거 + 첫 JSON 블록 추출)
+        s = _strip_code_fence(value)
+        s = _extract_first_json_block(s)
+        ok, obj = _loads_once(s)
+        if ok:
+            return _maybe_decode_nested(obj)
+
+        # 3) 모두 실패 → 원문 반환
+        logger.debug("⚠️ JSON 파싱 실패 (원문 반환) | snippet=%s", value[:120])
+        return value
 
     def _format_plans_md(self, plans: List[Dict[str, Any]]) -> str:
         """list_of_plans_per_task → Markdown 문자열로 축약"""

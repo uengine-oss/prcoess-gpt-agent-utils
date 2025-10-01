@@ -39,8 +39,7 @@ async def _async_retry(
             delay = base_delay * (2 ** (attempt - 1)) + jitter
             logger.warning(
                 "⏳ 재시도 지연: name=%s attempt=%d/%d delay=%.2fs error=%s",
-                name, attempt, retries, delay, str(e),
-                exc_info=e
+                name, attempt, retries, delay, str(e)
             )
             await asyncio.sleep(delay)
 
@@ -166,11 +165,6 @@ async def save_event(
             name="save_event.insert",
             retries=3,
             base_delay=0.8,
-        )
-
-        logger.info(
-            "✅ 이벤트 저장 완료: id=%s job_id=%s event_type=%s crew_type=%s",
-            result_id, job_id, event_type, crew_type
         )
         return result_id
 

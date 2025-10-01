@@ -7,6 +7,8 @@ from crewai.tools import BaseTool
 from dotenv import load_dotenv
 from mem0 import Memory
 import requests
+from sqlalchemy import text as sql_text
+import vecs
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +28,54 @@ if not all([DB_USER, DB_PASSWORD, DB_HOST, DB_PORT, DB_NAME]):
     raise ValueError("❌ DB 연결 환경 변수가 설정되지 않았습니다. .env 파일을 확인해주세요.")
 
 CONNECTION_STRING = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+
+# ============================================================================
+# vecs 패치 함수 (create_index 내부 DROP을 IF EXISTS로 안전화)
+# ============================================================================
+_VECS_PATCHED = False
+
+def _apply_vecs_drop_if_exists_patch():
+    """
+    vecs.Collection.create_index() 내부 DROP을 IF EXISTS로 안전화.
+    - 선제 IF EXISTS DROP 실행
+    - self._index = None 설정하여 원본 DROP 분기 우회
+    - 이후 원본 create_index 호출 (중복 DROP 없음)
+    """
+    try:
+        global _VECS_PATCHED
+        if _VECS_PATCHED:
+            return
+
+        Original_create_index = vecs.collection.Collection.create_index
+
+        def Patched_create_index(self, *args, **kwargs):
+            replace = kwargs.get("replace", True)
+
+            # 원본은 여기서 DROP을 실행:
+            # if self.index is not None:
+            #     if replace:
+            #         sess.execute(text(f'drop index vecs."{self.index}";'))
+            #         self._index = None
+            #
+            # → 우리는 원본 이전에 IF EXISTS로 드롭을 끝내고,
+            #   _index=None으로 만들어 원본 DROP 분기를 우회시킨다.
+            if getattr(self, "index", None) is not None and replace:
+                with self.client.Session() as sess:
+                    sess.execute(sql_text(f'drop index if exists vecs."{self.index}";'))
+                    sess.commit()
+                try:
+                    setattr(self, "_index", None)
+                except Exception:
+                    pass
+
+            # 이제 원본을 호출하면 생성(create)만 진행됨
+            return Original_create_index(self, *args, **kwargs)
+
+        vecs.collection.Collection.create_index = Patched_create_index
+        _VECS_PATCHED = True
+        logger.info("✅ vecs.Collection.create_index 패치 적용 완료 (DROP INDEX IF EXISTS, no double-drop)")
+    except Exception as e:
+        logger.warning("⚠️ vecs create_index 패치 실패: %s", str(e))
 
 # ============================================================================
 # 스키마 정의
@@ -90,7 +140,7 @@ class Mem0Tool(BaseTool):
         logger.info("\n\n✅ Mem0Tool 초기화 완료 | user_id=%s, namespace=%s", self._user_id, self._namespace)
 
     def _initialize_memory(self) -> Memory:
-        """Memory 인스턴스 초기화 - 에이전트별"""
+        """Memory 인스턴스 초기화 - 에이전트별 (안전화 버전)"""
         config = {
             "vector_store": {
                 "provider": "supabase",
@@ -102,7 +152,18 @@ class Mem0Tool(BaseTool):
                 },
             }
         }
-        return Memory.from_config(config_dict=config)
+
+        try:
+            return Memory.from_config(config_dict=config)
+        except Exception as e:
+            msg = str(e)
+            # vecs 내부 DROP INDEX가 '존재하지 않음'으로 실패한 경우에만 보정
+            if ("does not exist" in msg) or ("UndefinedObject" in msg):
+                logger.warning("⚠️ vecs DROP 오류 감지. IF EXISTS 패치 적용 후 재시도합니다. err=%s", msg)
+                _apply_vecs_drop_if_exists_patch()
+                return Memory.from_config(config_dict=config)
+            # 그 외 예외는 현행과 동일하게 전파 (실패)
+            raise
 
     def _run(self, query: str) -> str:
         """지식 검색 및 결과 반환 - 에이전트별 메모리에서"""
@@ -146,7 +207,6 @@ class Mem0Tool(BaseTool):
             items.append(f"개인지식 {idx} (관련도: {score:.2f})\n{memory_text}")
         return "\n\n".join(items)
 
-
 # ============================================================================
 # 사내 문서 검색 (memento) 도구
 # ============================================================================
@@ -186,9 +246,9 @@ class MementoTool(BaseTool):
         
         try:
             logger.info("🔍 사내문서 검색 시작 | tenant_id=%s, query=%s", self._tenant_id, query)
-            resp = requests.post(
+            resp = requests.get(
                 "http://memento.process-gpt.io/retrieve",
-                json={"query": query, "options": {"tenant_id": self._tenant_id}},
+                params={"query": query, "tenant_id": self._tenant_id},
                 timeout=40,
             )
             resp.raise_for_status()

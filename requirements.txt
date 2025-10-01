@@ -1,6 +1,6 @@
 supabase>=2.0.0
 python-dotenv>=1.0.0
-mem0ai>=0.1.94
+mem0ai==0.1.108
 typing-extensions>=4.0.0
 crewai>=0.152.0,<=0.175.0
 crewai-tools[mcp]>=0.43.0
@@ -9,3 +9,5 @@ pydantic>=2.0.0
 requests>=2.25.0
 pillow>=10.4.0
 anyio>=3.0.0
+a2a-sdk==0.3.0
+vecs>=0.4.5

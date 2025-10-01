@@ -110,10 +110,12 @@ pip install -e ".[dev]"
 ```bash
 # Linux/Mac
 ./release.sh 0.1.4
-
+python -m ensurepip --upgrade
 # Windows
 .\release.ps1 -Version 0.1.1
 ```
+
+python -m ensurepip --upgrade
 
 ## 📄 라이선스
 
