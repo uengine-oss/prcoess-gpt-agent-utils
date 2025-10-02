@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import re
 import logging
-import asyncio
 from typing import Any, Dict, Optional, List
 
 logger = logging.getLogger(__name__)
@@ -56,7 +55,7 @@ class CrewAIEventLogger:
     def on_event(self, event: Any, source: Any = None) -> None:
         """
         이벤트 수신 → (job_id, event_type, data) 추출 → DB 저장
-        - 동기 메서드이며 내부에서 asyncio.run(...)으로 비동기 저장 1회 수행
+        - 동기 메서드이며 내부에서는 save_event_sync로 저장 수행
         - 모든 예외는 상위로 전파
         """
         logger.info("📨 CrewAI 이벤트 수신 시작 | event_class=%s", event.__class__.__name__ if event else "None")
@@ -156,10 +155,6 @@ class CrewAIEventLogger:
                 if isinstance(parsed, dict) and "list_of_plans_per_task" in parsed:
                     md = self._format_plans_md(parsed["list_of_plans_per_task"])
                     return {"plans": md}
-
-                # 개인정보 가능성 있는 폼데이터 제거 (기존 정책 유지)
-                if isinstance(parsed, dict) and "폼_데이터" in parsed:
-                    parsed = {k: v for k, v in parsed.items() if k != "폼_데이터"}
 
                 return {"result": parsed}
 

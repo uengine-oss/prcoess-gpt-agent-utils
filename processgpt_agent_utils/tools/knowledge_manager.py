@@ -1,6 +1,7 @@
 from __future__ import annotations
 import os
 import logging
+import zlib
 from typing import Optional, List, Type
 from pydantic import BaseModel, Field, PrivateAttr, field_validator
 from crewai.tools import BaseTool
@@ -29,53 +30,73 @@ if not all([DB_USER, DB_PASSWORD, DB_HOST, DB_PORT, DB_NAME]):
 
 CONNECTION_STRING = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 
+# 외부 사내문서 검색 API (환경변수로 재정의 가능)
+MEMENTO_API_URL = os.getenv("MEMENTO_API_URL", "https://memento.process-gpt.io/retrieve")
+
 # ============================================================================
-# vecs 패치 함수 (create_index 내부 DROP을 IF EXISTS로 안전화)
+# vecs 패치: create_index를 항상 replace=False로 강제 + 컬렉션 단위 advisory lock 직렬화
+#  - 사전(모듈 로드 시) 적용하여 최초 호출부터 안전
+#  - 인덱스가 이미 있으면 조용히 스킵(에러/드롭 없음), 없을 때만 생성
 # ============================================================================
 _VECS_PATCHED = False
 
 def _apply_vecs_drop_if_exists_patch():
     """
-    vecs.Collection.create_index() 내부 DROP을 IF EXISTS로 안전화.
-    - 선제 IF EXISTS DROP 실행
-    - self._index = None 설정하여 원본 DROP 분기 우회
-    - 이후 원본 create_index 호출 (중복 DROP 없음)
+    vecs.Collection.create_index()를 monkey patch:
+      1) 컬렉션 단위 advisory lock 획득
+      2) 인덱스 최신 상태 강제 조회 후, 이미 있으면 스킵 (드롭/재생성 안 함)
+      3) 없을 때만 원본 create_index 호출 (replace=False로 강제)
+      4) advisory lock 해제
     """
-    try:
-        global _VECS_PATCHED
-        if _VECS_PATCHED:
-            return
+    global _VECS_PATCHED
+    if _VECS_PATCHED:
+        return
 
-        Original_create_index = vecs.collection.Collection.create_index
+    Original_create_index = vecs.collection.Collection.create_index
+    
+    def Patched_create_index(self, *args, **kwargs):
+        # 0) 항상 replace=False 강제 (드롭 방지)
+        kwargs["replace"] = False
 
-        def Patched_create_index(self, *args, **kwargs):
-            replace = kwargs.get("replace", True)
+        # 컬렉션명 기반 고유 advisory lock 키 (schema까지 고려 권장)
+        try:
+            schema = getattr(self.table, "schema", "vecs") or "vecs"
+        except Exception:
+            schema = "vecs"
+        lock_key_src = f"{schema}.{self.table.name}"
+        lock_key = abs(zlib.crc32(f"vecs:{lock_key_src}".encode()))
 
-            # 원본은 여기서 DROP을 실행:
-            # if self.index is not None:
-            #     if replace:
-            #         sess.execute(text(f'drop index vecs."{self.index}";'))
-            #         self._index = None
-            #
-            # → 우리는 원본 이전에 IF EXISTS로 드롭을 끝내고,
-            #   _index=None으로 만들어 원본 DROP 분기를 우회시킨다.
-            if getattr(self, "index", None) is not None and replace:
-                with self.client.Session() as sess:
-                    sess.execute(sql_text(f'drop index if exists vecs."{self.index}";'))
-                    sess.commit()
+        with self.client.Session() as sess:
+            # 대기 시간도 로그로 보이게
+            sess.execute(sql_text("SET LOCAL lock_timeout = '15s'"))
+            logger.info(f"🔒 [vecs] {lock_key_src}: advisory lock 대기 (key={lock_key})")
+            sess.execute(sql_text("SELECT pg_advisory_lock(:k)"), {"k": lock_key})
+            logger.info(f"✅ [vecs] {lock_key_src}: advisory lock 획득 (key={lock_key})")
+            try:
+                # 인덱스 캐시 무효화 후 최신 조회
                 try:
                     setattr(self, "_index", None)
                 except Exception:
                     pass
+                current_index = self.index
 
-            # 이제 원본을 호출하면 생성(create)만 진행됨
-            return Original_create_index(self, *args, **kwargs)
+                if current_index is not None:
+                    logger.info(f"⏩ [vecs] {lock_key_src}: 인덱스 이미 존재({current_index}) → 생성 스킵")
+                    return None
 
-        vecs.collection.Collection.create_index = Patched_create_index
-        _VECS_PATCHED = True
-        logger.info("✅ vecs.Collection.create_index 패치 적용 완료 (DROP INDEX IF EXISTS, no double-drop)")
-    except Exception as e:
-        logger.warning("⚠️ vecs create_index 패치 실패: %s", str(e))
+                logger.info(f"🆕 [vecs] {lock_key_src}: 인덱스 없음 → 새로 생성 시작")
+                return Original_create_index(self, *args, **kwargs)
+
+            finally:
+                sess.execute(sql_text("SELECT pg_advisory_unlock(:k)"), {"k": lock_key})
+                logger.info(f"🔓 [vecs] {lock_key_src}: advisory lock 해제 (key={lock_key})")
+
+    vecs.collection.Collection.create_index = Patched_create_index
+    _VECS_PATCHED = True
+    logger.info("✅ vecs create_index 패치 사전 적용 완료 (항상 replace=False + advisory lock + 이미 있으면 스킵)")
+
+# 🔹 모듈 로드 시점에 무조건 패치 적용 (eager)
+_apply_vecs_drop_if_exists_patch()
 
 # ============================================================================
 # 스키마 정의
@@ -157,9 +178,9 @@ class Mem0Tool(BaseTool):
             return Memory.from_config(config_dict=config)
         except Exception as e:
             msg = str(e)
-            # vecs 내부 DROP INDEX가 '존재하지 않음'으로 실패한 경우에만 보정
+            # (이 경로는 거의 타지 않겠지만) 혹시 vecs 관련 에러면 안전 재시도
             if ("does not exist" in msg) or ("UndefinedObject" in msg):
-                logger.warning("⚠️ vecs DROP 오류 감지. IF EXISTS 패치 적용 후 재시도합니다. err=%s", msg)
+                logger.warning("⚠️ vecs DROP 오류 감지. 패치 재적용 후 재시도합니다. err=%s", msg)
                 _apply_vecs_drop_if_exists_patch()
                 return Memory.from_config(config_dict=config)
             # 그 외 예외는 현행과 동일하게 전파 (실패)
@@ -247,12 +268,31 @@ class MementoTool(BaseTool):
         try:
             logger.info("🔍 사내문서 검색 시작 | tenant_id=%s, query=%s", self._tenant_id, query)
             resp = requests.get(
-                "http://memento.process-gpt.io/retrieve",
+                "https://memento.process-gpt.io/api/retrieve",
                 params={"query": query, "tenant_id": self._tenant_id},
+                headers={"Accept": "application/json"},
                 timeout=40,
             )
             resp.raise_for_status()
-            data = resp.json()
+            # 응답 본문이 비어있거나 JSON이 아닐 수 있으므로 견고하게 처리
+            content_type = (resp.headers.get("Content-Type") or "").lower()
+            raw_text = resp.text or ""
+            if not raw_text.strip():
+                logger.info("📭 사내문서 검색 빈 응답 | tenant_id=%s query=%s status=%s", self._tenant_id, query, resp.status_code)
+                return f"테넌트 '{self._tenant_id}'에서 '{query}' 검색 결과가 없습니다."
+
+            try:
+                data = resp.json()
+            except Exception:
+                logger.warning(
+                    "❌ 사내문서 JSON 파싱 실패 | tenant_id=%s status=%s content_type=%s snippet=%s",
+                    self._tenant_id,
+                    resp.status_code,
+                    content_type,
+                    raw_text[:200],
+                )
+                return f"사내문서 검색 응답이 JSON이 아닙니다 (status={resp.status_code}, content_type='{content_type}')."
+                
             docs = data.get("response", [])
             logger.info("📄 사내문서 검색 결과: %d개", len(docs))
             if not docs:

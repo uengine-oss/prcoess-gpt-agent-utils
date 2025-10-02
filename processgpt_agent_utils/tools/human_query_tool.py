@@ -4,14 +4,17 @@ import json
 import logging
 import time
 import uuid
-import asyncio
 from typing import Optional, List, Type, Dict, Any, Literal
 
 from pydantic import BaseModel, Field
 from crewai.tools import BaseTool
 
 from ..utils.context_manager import get_context_snapshot
-from ..utils.database import fetch_human_response, save_notification, save_event
+from ..utils.database import (
+    fetch_human_response_sync,
+    save_notification_sync,
+    save_event_sync,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +105,7 @@ class HumanQueryTool(BaseTool):
 
         logger.info("\n\n✅ HumanQueryTool 초기화 완료 | proc_inst_id=%s task_id=%s tenant_id=%s agent_name=%s user_ids_csv=%s", proc_inst_id, task_id, tenant_id, agent_name, user_ids_csv)
 
-    # CrewAI Tool 규약: 동기 실행
+    # CrewAI Tool 규약: 동기 실행 (내부 비동기 작업은 sync 래퍼 사용)
     def _run(self, role: str, text: str, type: str = "text", options: Optional[List[str]] = None) -> str:
         logger.info("\n\n👤 사용자 확인 요청 시작 | role=%s type=%s", role, type)
         
@@ -123,13 +126,13 @@ class HumanQueryTool(BaseTool):
 
         # 4) 이벤트를 DB에 직접 저장
         try:
-            asyncio.run(save_event(
+            save_event_sync(
                 job_id=job_id,
                 proc_inst_id=self._proc_inst_id,
                 crew_type=crew_type,
                 data=payload,
                 event_type="human_asked",
-            ))
+            )
             logger.info("✅ 사용자 확인 이벤트 DB 저장 완료 | proc=%s task=%s job_id=%s", self._proc_inst_id, self._task_id, job_id)
         except Exception as e:
             logger.error("❌ 사용자 확인 이벤트 DB 저장 실패 | proc=%s task=%s job_id=%s err=%s", self._proc_inst_id, self._task_id, job_id, str(e), exc_info=True)
@@ -138,7 +141,7 @@ class HumanQueryTool(BaseTool):
         # 5) 알림 저장 (있으면)
         try:
             if self._user_ids_csv and self._user_ids_csv.strip():
-                asyncio.run(save_notification(
+                save_notification_sync(
                     title=text,
                     notif_type="workitem_bpm",
                     description=self._agent_name,
@@ -146,7 +149,7 @@ class HumanQueryTool(BaseTool):
                     tenant_id=self._tenant_id,
                     url=f"/todolist/{self._task_id}" if self._task_id else None,
                     from_user_id=self._agent_name,
-                ))
+                )
                 logger.info("✅ 사용자 알림 저장 완료 | user_ids_csv=%s", self._user_ids_csv)
             else:
                 logger.info("⏭️ 사용자 알림 저장 생략: user_ids_csv 비어있음")
@@ -169,7 +172,7 @@ class HumanQueryTool(BaseTool):
 
         while time.time() < deadline:
             try:
-                event = asyncio.run(fetch_human_response(job_id=job_id))
+                event = fetch_human_response_sync(job_id=job_id)
                 if event:
                     data = (event.get("data") or {})
                     answer = data.get("answer")
