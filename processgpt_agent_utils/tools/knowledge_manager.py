@@ -30,9 +30,6 @@ if not all([DB_USER, DB_PASSWORD, DB_HOST, DB_PORT, DB_NAME]):
 
 CONNECTION_STRING = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 
-# 외부 사내문서 검색 API (환경변수로 재정의 가능)
-MEMENTO_API_URL = os.getenv("MEMENTO_API_URL", "https://memento.process-gpt.io/retrieve")
-
 # ============================================================================
 # vecs 패치: create_index를 항상 replace=False로 강제 + 컬렉션 단위 advisory lock 직렬화
 #  - 사전(모듈 로드 시) 적용하여 최초 호출부터 안전

@@ -4,7 +4,7 @@ import os
 import subprocess
 import time
 import logging
-from typing import List
+from typing import List, Optional, Dict
 
 import anyio
 from mcp.client.stdio import StdioServerParameters
@@ -14,6 +14,15 @@ from .knowledge_manager import Mem0Tool, MementoTool
 from .human_query_tool import HumanQueryTool
 
 from processgpt_agent_utils.utils.context_manager import proc_inst_id_var, task_id_var, users_email_var
+
+# === A2A 전용 임포트 (로컬 모듈 사용) ======================================
+# 프로젝트 내 제공되는 a2a_client_tool에서 직접 임포트
+try:
+    from .a2a_client_tool import A2AAgentTool, AgentEndpoint  # 리팩토링된 A2A 툴
+except Exception:  # 모듈 미존재 시 A2A는 건너뛰도록 처리
+    A2AAgentTool = None  # type: ignore
+    AgentEndpoint = None  # type: ignore
+# ============================================================================
 
 logger = logging.getLogger(__name__)
 
@@ -79,15 +88,19 @@ class SafeToolLoader:
         logger.debug("📝 NPX 명령어 기본값 사용 | path=npx")
         return "npx"
 
-    def create_tools_from_names(self, tool_names: List[str]) -> List:
-        """tool_names 리스트에서 실제 Tool 객체 생성"""
+    # ----------------------- [변경] agent_type / a2a_endpoints 인자 추가 -----------------------
+    def create_tools_from_names(self, tool_names: List[str], agent_type: Optional[str] = None, a2a_endpoints: Optional[Dict[str, Dict]] = None) -> List:
+        """tool_names 리스트에서 실제 Tool 객체 생성
+        - agent_type: 'a2a' 또는 None/'' (None/'' 이면 A2A 건너뜀)
+        - a2a_endpoints: {'airbnb': {'url': '...', 'headers': {...}}, ...}
+        """
         if isinstance(tool_names, str):
             tool_names = [tool_names]
-        logger.info("🛠️ 도구 생성 요청 시작 | tool_names=%s", tool_names)
+        logger.info("🛠️ 도구 생성 요청 시작 | tool_names=%s agent_type=%s", tool_names, agent_type)
 
         tools = []
         
-        # 기본 로컬 도구들 로드
+        # 기본 로컬 도구들 로드 (항상)
         logger.info("📦 기본 로컬 도구들 로드 시작 | local_tools=%s", self.local_tools)
         mem0_tools = self._load_mem0()
         memento_tools = self._load_memento()
@@ -98,7 +111,25 @@ class SafeToolLoader:
         logger.info("✅ 기본 로컬 도구들 로드 완료 | mem0=%d memento=%d human_asked=%d total=%d", 
                    len(mem0_tools), len(memento_tools), len(human_asked_tools), len(tools))
 
-        # 요청된 도구들 처리
+        # ------------------------------
+        # [추가] A2A 툴 로드: agent_type == 'a2a' 인 경우만 수행
+        # 규칙: tool_names 중 'a2a:' 프리픽스가 붙은 이름만 A2A 후보로 추출
+        # ------------------------------
+        if (agent_type or "").lower() == "a2a":
+            a2a_candidates: List[str] = []
+            for name in tool_names:
+                if isinstance(name, str) and name.lower().startswith("a2a:"):
+                    a2a_candidates.append(name.split(":", 1)[1].strip())
+            if a2a_candidates:
+                logger.info("🚀 A2A 도구 로드 시작 | candidates=%s", a2a_candidates)
+                tools.extend(self._load_a2a_tools(a2a_candidates, a2a_endpoints))
+                logger.info("✅ A2A 도구 로드 완료 | total_tools=%d", len(tools))
+            else:
+                logger.info("⏭️ A2A 도구 로드 생략: 'a2a:' 프리픽스 없음")
+
+        # ------------------------------
+        # MCP 도구 로드: JSON 설정이 있을 경우에만 (기존 로직 유지)
+        # ------------------------------
         logger.info("🔧 요청된 도구들 처리 시작 | requested_tools=%s", tool_names)
         for name in tool_names:
             key = name.strip().lower()
@@ -107,12 +138,16 @@ class SafeToolLoader:
             if key in self.local_tools:
                 logger.info("⏭️ 도구 처리 생략: 이미 로컬 도구로 로드됨 | key=%s", key)
                 continue
-            else:
-                logger.info("🚀 MCP 도구 로드 시작 | key=%s", key)
-                self.warmup_server(key)
-                mcp_tools = self._load_mcp_tool(key)
-                tools.extend(mcp_tools)
-                logger.info("✅ MCP 도구 로드 완료 | key=%s tools_count=%d", key, len(mcp_tools))
+            if key.startswith("a2a:"):
+                logger.info("⏭️ 도구 처리 생략: A2A는 상단 분기에서 처리 | key=%s", key)
+                continue
+
+            # MCP: 설정이 있을 경우에만 로딩
+            logger.info("🚀 MCP 도구 로드 시작 | key=%s", key)
+            self.warmup_server(key)
+            mcp_tools = self._load_mcp_tool(key)
+            tools.extend(mcp_tools)
+            logger.info("✅ MCP 도구 로드 완료 | key=%s tools_count=%d", key, len(mcp_tools))
 
         logger.info("🎉 도구 생성 완료 | total_tools=%d tool_names=%s", len(tools), [t.name if hasattr(t, 'name') else str(t) for t in tools])
         return tools
@@ -266,6 +301,80 @@ class SafeToolLoader:
         except Exception as e:
             logger.error("❌ MCP 설정 검색 실패 | tool_name=%s err=%s", tool_name, str(e), exc_info=True)
             raise
+
+    # ======================= [추가] A2A 헬퍼 ==========================
+    def _load_a2a_tools(self, a2a_names: List[str], a2a_endpoints: Optional[Dict[str, Dict]] = None) -> List:
+        """
+        A2A 도구 로드:
+        - a2a_names: ['airbnb', 'jira', ...]
+        - a2a_endpoints (선택): {'airbnb': {'url': 'http://...', 'headers': {...}}, ...}
+          (없으면 환경변수 A2A_{NAME}_URL / A2A_{NAME}_HEADERS 에서 조회)
+        """
+        if A2AAgentTool is None or AgentEndpoint is None:
+            logger.warning("⏭️ A2A 로드 생략: a2a_tools 모듈을 찾을 수 없음")
+            return []
+
+        loaded = []
+
+        import asyncio
+        async def _create_all():
+            for name in a2a_names:
+                endpoint = self._resolve_a2a_endpoint(name, a2a_endpoints)
+                if not endpoint:
+                    logger.warning("⚠️ A2A 엔드포인트 누락 → 스킵 | name=%s", name)
+                    continue
+                try:
+                    tool = await A2AAgentTool.create(endpoint=endpoint, name=f"A2A:{name}", timeout_sec=60)
+                    loaded.append(tool)
+                    logger.info("✅ A2A 로드 완료 | name=%s url=%s", name, endpoint.url)
+                except Exception as e:
+                    logger.error("❌ A2A 로드 실패 | name=%s err=%s", name, str(e), exc_info=True)
+
+        try:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+
+            if loop and loop.is_running():
+                fut = asyncio.run_coroutine_threadsafe(_create_all(), loop)
+                fut.result()
+            else:
+                asyncio.run(_create_all())
+        except Exception as e:
+            logger.error("❌ A2A 로드 실행 실패 | err=%s", str(e), exc_info=True)
+
+        return loaded
+
+    def _resolve_a2a_endpoint(self, name: str, a2a_endpoints: Optional[Dict[str, Dict]] = None) -> Optional[AgentEndpoint]:
+        """
+        이름 기반 A2A 엔드포인트 해석 우선순위:
+        1) a2a_endpoints 딕셔너리
+        2) 환경변수 A2A_{NAME}_URL (필수), A2A_{NAME}_HEADERS (선택 JSON)
+        """
+        # 1) 명시 딕셔너리 우선
+        if a2a_endpoints and name in a2a_endpoints:
+            cfg = a2a_endpoints[name] or {}
+            url = cfg.get("url")
+            headers = cfg.get("headers") or {}
+            if url:
+                return AgentEndpoint(url=url, headers=headers)
+
+        # 2) 환경변수
+        key = name.upper().replace("-", "_")
+        url = os.getenv(f"A2A_{key}_URL")
+        if not url:
+            return None
+        headers_raw = os.getenv(f"A2A_{key}_HEADERS")
+        headers: Dict[str, str] = {}
+        if headers_raw:
+            try:
+                import json as _json
+                headers = _json.loads(headers_raw) or {}
+            except Exception:
+                logger.warning("⚠️ A2A 헤더 JSON 파싱 실패 → 무시 | name=%s", name)
+        return AgentEndpoint(url=url, headers=headers)
+    # ===================================================================
 
     @classmethod
     def shutdown_all_adapters(cls):
