@@ -12,6 +12,7 @@ from crewai_tools import MCPServerAdapter
 
 from .knowledge_manager import Mem0Tool, MementoTool
 from .human_query_tool import HumanQueryTool
+from .dmn_rule_tool import DMNRuleTool
 
 from processgpt_agent_utils.utils.context_manager import proc_inst_id_var, task_id_var, users_email_var
 
@@ -35,7 +36,7 @@ class SafeToolLoader:
         self.user_id = user_id
         self.agent_name = agent_name
         self.mcp_config = mcp_config or {}
-        self.local_tools = ["mem0", "memento", "human_asked"]
+        self.local_tools = ["mem0", "memento", "human_asked", "dmn_rule"]
         logger.info("\n\n✅ SafeToolLoader 초기화 완료 | tenant_id=%s, user_id=%s, local_tools=%s", tenant_id, user_id, self.local_tools)
 
     def warmup_server(self, server_key: str):
@@ -105,11 +106,13 @@ class SafeToolLoader:
         mem0_tools = self._load_mem0()
         memento_tools = self._load_memento()
         human_asked_tools = self._load_human_asked()
+        dmn_rule_tools = self._load_dmn_rule()
         tools.extend(mem0_tools)
         tools.extend(memento_tools)
         tools.extend(human_asked_tools)
-        logger.info("✅ 기본 로컬 도구들 로드 완료 | mem0=%d memento=%d human_asked=%d total=%d", 
-                   len(mem0_tools), len(memento_tools), len(human_asked_tools), len(tools))
+        tools.extend(dmn_rule_tools)
+        logger.info("✅ 기본 로컬 도구들 로드 완료 | mem0=%d memento=%d human_asked=%d dmn_rule=%d total=%d", 
+                   len(mem0_tools), len(memento_tools), len(human_asked_tools), len(dmn_rule_tools), len(tools))
 
         # ------------------------------
         # [추가] A2A 툴 로드: agent_type == 'a2a' 인 경우만 수행
@@ -202,6 +205,23 @@ class SafeToolLoader:
             return [tool]
         except Exception as e:
             logger.error("❌ HumanQueryTool 로드 실패 | tenant_id=%s agent_name=%s err=%s", self.tenant_id, self.agent_name, str(e), exc_info=True)
+            raise
+
+    def _load_dmn_rule(self) -> List:
+        logger.debug("📋 DMNRuleTool 로드 시작 | tenant_id=%s user_id=%s", self.tenant_id, self.user_id)
+        try:
+            if not self.tenant_id:
+                logger.info("⏭️ DMNRuleTool 로드 생략: tenant_id 없음")
+                return []
+            if not self.user_id:
+                logger.info("⏭️ DMNRuleTool 로드 생략: user_id 없음")
+                return []
+
+            tool = DMNRuleTool(tenant_id=self.tenant_id, user_id=self.user_id)
+            logger.info("✅ DMNRuleTool 로드 완료 | tenant_id=%s user_id=%s", self.tenant_id, self.user_id)
+            return [tool]
+        except Exception as e:
+            logger.error("❌ DMNRuleTool 로드 실패 | tenant_id=%s user_id=%s err=%s", self.tenant_id, self.user_id, str(e), exc_info=True)
             raise
 
     def _load_mcp_tool(self, tool_name: str) -> List:

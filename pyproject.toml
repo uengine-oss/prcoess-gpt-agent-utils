@@ -7,7 +7,7 @@ name = "process-gpt-agent-utils"
 version = "0.2.1"
 description = "ProcessGPT Agent Utilities - 도구 로더, 지식 관리, 이벤트 로깅, 데이터베이스 유틸리티"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = { text = "MIT" }
 keywords = ["agent", "processgpt", "tools", "knowledge", "logging", "database", "crewai", "mcp"]
 classifiers = [
@@ -60,7 +60,7 @@ include = ["processgpt_agent_utils*"]
 
 [tool.black]
 line-length = 88
-target-version = ['py39']
+target-version = ['py310']
 include = '\.pyi?$'
 extend-exclude = '''
 /(
