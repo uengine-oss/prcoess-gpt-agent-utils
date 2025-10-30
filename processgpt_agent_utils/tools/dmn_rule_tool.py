@@ -110,7 +110,7 @@ class DMNRuleTool(BaseTool):
 
         except Exception as e:
             logger.error("❌ DMN 규칙 기반 쿼리 분석 실패 | tenant_id=%s query=%s err=%s", 
-                        self._tenant_id, query, str(e), exc_info=True)
+            self._tenant_id, query, str(e), exc_info=True)
             raise
 
     def _analyze_query_with_rules(self, query: str, context: Optional[str] = None) -> str:
@@ -134,7 +134,7 @@ class DMNRuleTool(BaseTool):
                 return f"사용자 '{self._user_id}'의 DMN 규칙 중 쿼리와 관련된 규칙을 찾을 수 없습니다."
             
             # 쿼리 분석 및 답변 추론
-            answer = self._infer_answer_from_rules(query, relevant_rules)
+            answer = self._evaluate_with_rules(query, relevant_rules)
             
             return answer
             
@@ -142,161 +142,32 @@ class DMNRuleTool(BaseTool):
             logger.error("❌ 쿼리 분석 실패 | err=%s", str(e))
             return f"쿼리 분석 중 오류가 발생했습니다: {str(e)}"
 
-    def _infer_answer_from_rules(self, query: str, rules: List[Dict[str, Any]]) -> str:
-        """규칙을 기반으로 쿼리에 대한 답변 추론"""
-        try:
-            query_lower = query.lower()
-            
-            # 쿼리 타입 분석 (범용적)
-            if any(word in query_lower for word in ['어떻게', '방법', '과정', '절차', 'how', 'process']):
-                return self._explain_how_rules_work(query, rules)
-            elif any(word in query_lower for word in ['평가', '결정', '판단', '계산', 'evaluate', 'decide', 'calculate']):
-                return self._evaluate_with_rules(query, rules)
-            else:
-                return self._general_rule_explanation(query, rules)
-                
-        except Exception as e:
-            logger.error("❌ 답변 추론 실패 | err=%s", str(e))
-            return f"답변 추론 중 오류가 발생했습니다: {str(e)}"
-
-    def _explain_how_rules_work(self, query: str, rules: List[Dict[str, Any]]) -> str:
-        """규칙이 어떻게 작동하는지 설명"""
-        try:
-            explanations = []
-            
-            for rule in rules:
-                rule_name = rule.get('name', '규칙')
-                bpmn_xml = rule.get('bpmn')
-                
-                if bpmn_xml:
-                    explanation = self._extract_rule_explanation(bpmn_xml, rule_name)
-                    explanations.append(explanation)
-            
-            if explanations:
-                return "\n\n".join(explanations)
-            else:
-                return f"'{query}'에 대한 규칙 설명을 찾을 수 없습니다."
-                
-        except Exception as e:
-            logger.error("❌ 규칙 설명 추출 실패 | err=%s", str(e))
-            return f"규칙 설명 추출 중 오류: {str(e)}"
-
     def _evaluate_with_rules(self, query: str, rules: List[Dict[str, Any]]) -> str:
-        """DMN 규칙을 기반으로 쿼리 평가"""
+        """DMN 규칙을 기반으로 쿼리 평가 - LLM 분석 사용"""
         try:
-            evaluations = []
-            
+            # 모든 규칙을 함께 분석하기 위해 DMN XML들을 수집
+            dmn_contexts = []
             for rule in rules:
                 rule_name = rule.get('name', '규칙')
                 bpmn_xml = rule.get('bpmn')
                 
                 if bpmn_xml:
-                    evaluation = self._analyze_query_with_dmn(bpmn_xml, rule_name, query)
-                    if evaluation:
-                        evaluations.append(evaluation)
+                    dmn_structure = self._parse_dmn_to_json(bpmn_xml)
+                    if dmn_structure:
+                        dmn_contexts.append({
+                            'rule_name': rule_name,
+                            'dmn_structure': dmn_structure,
+                            'bpmn_xml': bpmn_xml
+                        })
             
-            if evaluations:
-                return "\n\n".join(evaluations)
-            else:
-                return f"'{query}'에 대한 평가 결과를 찾을 수 없습니다."
+            if not dmn_contexts:
+                return f"'{query}'에 대한 DMN 규칙을 찾을 수 없습니다."
+            
+            return self._ai_inference_with_dmn(dmn_contexts, query)
                 
         except Exception as e:
             logger.error("❌ 규칙 평가 실패 | err=%s", str(e))
-            return f"규칙 평가 중 오류: {str(e)}"
-
-    def _general_rule_explanation(self, query: str, rules: List[Dict[str, Any]]) -> str:
-        """일반적인 규칙 설명"""
-        try:
-            explanations = []
-            
-            for rule in rules:
-                rule_name = rule.get('name', '규칙')
-                explanations.append(f"'{rule_name}' 규칙이 있습니다.")
-            
-            return f"'{query}'에 대한 관련 규칙들:\n" + "\n".join(explanations)
-                
-        except Exception as e:
-            logger.error("❌ 일반 규칙 설명 실패 | err=%s", str(e))
-            return f"규칙 설명 중 오류: {str(e)}"
-
-    def _extract_rule_explanation(self, bpmn_xml: str, rule_name: str) -> str:
-        """DMN XML에서 규칙 설명 추출"""
-        try:
-            root = ET.fromstring(bpmn_xml)
-            dmn_ns = {'dmn': 'https://www.omg.org/spec/DMN/20191111/MODEL/'}
-            
-            decisions = root.findall('.//dmn:decision', dmn_ns)
-            
-            if not decisions:
-                return f"{rule_name}: Decision을 찾을 수 없습니다."
-            
-            explanations = [f"{rule_name}은 다음과 같이 작동합니다:"]
-            
-            for decision in decisions:
-                decision_name = decision.get('name', 'Decision')
-                decision_table = decision.find('.//dmn:decisionTable', dmn_ns)
-                
-                if decision_table is not None:
-                    inputs = decision_table.findall('.//dmn:input', dmn_ns)
-                    outputs = decision_table.findall('.//dmn:output', dmn_ns)
-                    rules = decision_table.findall('.//dmn:rule', dmn_ns)
-                    
-                    # 입력 파라미터 설명
-                    input_names = []
-                    for inp in inputs:
-                        input_expr = inp.find('.//dmn:text', dmn_ns)
-                        if input_expr is not None:
-                            input_names.append(input_expr.text)
-                    
-                    explanations.append(f"- {decision_name}: {', '.join(input_names)}을 기준으로 평가합니다.")
-                    
-                    # 규칙 설명
-                    rule_descriptions = []
-                    for rule in rules[:3]:  # 처음 3개 규칙만
-                        input_entries = rule.findall('.//dmn:inputEntry', dmn_ns)
-                        output_entries = rule.findall('.//dmn:outputEntry', dmn_ns)
-                        
-                        conditions = []
-                        for entry in input_entries:
-                            text_elem = entry.find('.//dmn:text', dmn_ns)
-                            if text_elem is not None and text_elem.text and text_elem.text != '-':
-                                conditions.append(text_elem.text.strip())
-                        
-                        results = []
-                        for entry in output_entries:
-                            text_elem = entry.find('.//dmn:text', dmn_ns)
-                            if text_elem is not None and text_elem.text:
-                                results.append(text_elem.text.strip())
-                        
-                        if conditions and results:
-                            rule_descriptions.append(f"  • {' AND '.join(conditions)} → {', '.join(results)}")
-                    
-                    if rule_descriptions:
-                        explanations.extend(rule_descriptions)
-            
-            return "\n".join(explanations)
-            
-        except Exception as e:
-            logger.error("❌ 규칙 설명 추출 실패 | err=%s", str(e))
-            return f"{rule_name}: 규칙 설명 추출 실패"
-
-    def _analyze_query_with_dmn(self, bpmn_xml: str, rule_name: str, query: str) -> str:
-        """AI를 활용하여 DMN XML을 분석하고 쿼리에 대한 답변 생성"""
-        try:
-            # DMN 구조를 JSON으로 변환
-            dmn_structure = self._parse_dmn_to_json(bpmn_xml)
-            
-            if not dmn_structure:
-                return f"{rule_name}: DMN 구조를 파싱할 수 없습니다."
-            
-            # AI를 활용한 추론
-            result = self._ai_inference_with_dmn(dmn_structure, rule_name, query)
-            
-            return result
-            
-        except Exception as e:
-            logger.error("❌ DMN 쿼리 분석 실패 | err=%s", str(e))
-            return f"{rule_name}: 쿼리 분석 실패 - {str(e)}"
+            return f"규칙 평가 중 오류가 발생했습니다: {str(e)}"
 
     def _parse_dmn_to_json(self, bpmn_xml: str) -> Optional[Dict[str, Any]]:
         """DMN XML을 JSON 구조로 변환"""
@@ -377,19 +248,19 @@ class DMNRuleTool(BaseTool):
         except Exception as e:
             logger.error("❌ DMN 파싱 실패 | err=%s", str(e))
             return None
-
-    def _ai_inference_with_dmn(self, dmn_structure: Dict[str, Any], rule_name: str, query: str) -> str:
-        """AI를 활용한 DMN 규칙 기반 추론"""
+    
+    def _ai_inference_with_dmn(self, dmn_contexts: List[Dict[str, Any]], query: str) -> str:
+        """AI를 활용한 DMN 규칙 기반 추론 (여러 규칙 컨텍스트 지원)"""
         try:
             # OpenAI API 키 확인
             openai_api_key = os.getenv('OPENAI_API_KEY')
             if not openai_api_key:
                 logger.warning("⚠️ OPENAI_API_KEY가 설정되지 않음. 기본 분석 모드로 전환")
-                return self._fallback_analysis(dmn_structure, rule_name, query)
+                return self._fallback_analysis_multi(dmn_contexts, query)
             
             # AI 프롬프트 구성
-            prompt = self._build_ai_prompt(dmn_structure, rule_name, query)
-            
+            prompt = self._build_ai_prompt(dmn_contexts, query)
+
             # OpenAI API 호출
             client = openai.OpenAI(api_key=openai_api_key)
             response = client.chat.completions.create(
@@ -397,7 +268,30 @@ class DMNRuleTool(BaseTool):
                 messages=[
                     {
                         "role": "system",
-                        "content": "당신은 DMN(Decision Model and Notation) 규칙 분석 전문가입니다. 주어진 DMN 구조와 사용자 쿼리를 분석하여 정확하고 유용한 답변을 제공해야 합니다."
+                        "content": """당신은 DMN(Decision Model and Notation) 1.3 규칙 추론 전문가입니다.
+주어진 DMN XML 모델과 사용자 질문을 분석하여 비즈니스 의사결정이 어떻게 이루어지는지 설명해야 합니다.
+
+다음 구조로 문서를 작성하세요(입력값이 없어도 규칙 자체 설명은 반드시 포함):
+
+1. **질문 분석 (Question Analysis)**
+   - 사용자가 무엇을 묻는지 요약하고 의도를 설명
+
+2. **규칙 요약 (Rule Overview)**
+   - 관련 결정 테이블의 입력, 출력, hit policy, 주요 규칙들을 간단히 요약
+   - 최소 1개 이상의 규칙 예시를 조건→결과 형태로 제시
+
+3. **규칙 매칭 (Rule Matching)**
+   - 마크다운 표: Rule ID | 조건(입력값 기준) | 결과(Output) | 매칭여부(✅/❌)
+   - 입력값이 부족해도 표는 채우되 매칭여부는 ❌로 표시하고, 무엇이 부족한지 주석으로 덧붙이기
+
+4. **조건 평가 (Condition Evaluation)**
+   - 매칭된(또는 매칭 불가한) 규칙의 조건 충족 여부를 단계별로 설명
+   - 사용된 hit policy와 그 의미 설명
+
+5. **최종 결과 (Final Result)**
+   - 비즈니스적으로 어떤 결정/등급/혜택이 적용되는지 명확히 제시.
+   - 필요시 실제 수치/금액/등급 해석을 포함
+"""
                     },
                     {
                         "role": "user",
@@ -409,41 +303,51 @@ class DMNRuleTool(BaseTool):
             )
             
             ai_response = response.choices[0].message.content.strip()
-            logger.info("✅ AI 추론 완료 | rule_name=%s", rule_name)
+            logger.info("✅ AI 추론 완료 | contexts=%d", len(dmn_contexts))
             
             return ai_response
             
         except Exception as e:
             logger.error("❌ AI 추론 실패 | err=%s", str(e))
-            # AI 실패 시 폴백 분석 사용
-            return self._fallback_analysis(dmn_structure, rule_name, query)
+            # AI 실패 시 폴백 분석 사용 (여러 컨텍스트)
+            fallback_answers = []
+            for ctx in dmn_contexts:
+                rule_name = ctx.get('rule_name', '규칙')
+                dmn_structure = ctx.get('dmn_structure')
+                if dmn_structure:
+                    fallback_answers.append(self._fallback_analysis(dmn_structure, rule_name, query))
+            return "\n\n".join(ans for ans in fallback_answers if ans)
 
-    def _build_ai_prompt(self, dmn_structure: Dict[str, Any], rule_name: str, query: str) -> str:
+    def _build_ai_prompt(self, dmn_contexts: List[Dict[str, Any]], query: str) -> str:
         """AI 추론을 위한 프롬프트 구성"""
-        prompt = f"""
-다음은 '{rule_name}' DMN 규칙의 구조입니다:
+        prompt_parts = []
+        
+        # DMN 규칙들 설명
+        for i, ctx in enumerate(dmn_contexts, 1):
+            rule_name = ctx['rule_name']
+            dmn_structure = ctx['dmn_structure']
+            
+            prompt_parts.append(f"=== DMN 규칙 {i}: {rule_name} ===\n")
+            prompt_parts.append(json.dumps(dmn_structure, ensure_ascii=False, indent=2))
+            prompt_parts.append("\n")
+        
+        # 사용자 쿼리
+        prompt_parts.append(f"\n사용자 쿼리: \"{query}\"\n")
+        
+        # 지시사항
+        prompt_parts.append("""
+위 DMN 규칙들을 분석하여 다음을 수행해주세요.
 
-{json.dumps(dmn_structure, ensure_ascii=False, indent=2)}
+1. **질문 분석**: 사용자가 무엇을 묻는지 요약하고 의도를 설명
+2. **규칙 요약**: 입력/출력, hit policy, 대표 규칙 예시(조건→결과)
+3. **규칙 매칭**: 표 (Rule ID | 조건 | 결과 | 매칭여부). 입력값이 없으면 ❌과 부족한 항목 주석
+4. **조건 평가**: 충족/미충족 사유와 hit policy 설명
+5. **최종 결과**: 비즈니스적으로 어떤 결정/등급/혜택이 적용되는지 명확히 제시.
 
-사용자 쿼리: "{query}"
-
-위 DMN 규칙을 분석하여 다음을 수행해주세요:
-
-1. 쿼리 타입 분석:
-   - "어떻게" 질문인지, 구체적 평가 요청인지, 일반 질문인지 판단
-
-2. DMN 구조 이해:
-   - Decision, Input, Output, Rule의 의미 파악
-   - 비즈니스 로직의 목적 이해
-
-3. 쿼리에 대한 답변 생성:
-   - 규칙을 기반으로 한 구체적이고 정확한 답변
-   - 필요시 규칙 예시 포함
-   - 사용자가 이해하기 쉬운 형태로 설명
-
-답변은 한국어로 작성하고, DMN 규칙의 실제 내용을 반영하여 정확하게 답변해주세요.
-"""
-        return prompt
+답변은 한국어 마크다운으로 작성하고, 이모지(✅, 💡, 🔍 등)를 사용해 가독성을 높여주세요.
+""")
+        
+        return "".join(prompt_parts)
 
     def _fallback_analysis(self, dmn_structure: Dict[str, Any], rule_name: str, query: str) -> str:
         """AI 실패 시 사용할 기본 분석"""
@@ -494,43 +398,3 @@ class DMNRuleTool(BaseTool):
         except Exception as e:
             logger.error("❌ 폴백 분석 실패 | err=%s", str(e))
             return f"{rule_name}: 분석 실패 - {str(e)}"
-
-    def _extract_rule_info(self, bpmn_xml: str) -> List[str]:
-        """DMN XML에서 규칙 정보 추출"""
-        try:
-            root = ET.fromstring(bpmn_xml)
-            dmn_ns = {'dmn': 'https://www.omg.org/spec/DMN/20191111/MODEL/'}
-            
-            decisions = root.findall('.//dmn:decision', dmn_ns)
-            rule_info = []
-            
-            for decision in decisions:
-                decision_name = decision.get('name', 'Unknown')
-                decision_table = decision.find('.//dmn:decisionTable', dmn_ns)
-                
-                if decision_table is not None:
-                    inputs = decision_table.findall('.//dmn:input', dmn_ns)
-                    outputs = decision_table.findall('.//dmn:output', dmn_ns)
-                    rules = decision_table.findall('.//dmn:rule', dmn_ns)
-                    
-                    rule_info.append(f"   📊 Decision: {decision_name}")
-                    rule_info.append(f"   📥 Input: {len(inputs)}개")
-                    rule_info.append(f"   📤 Output: {len(outputs)}개")
-                    rule_info.append(f"   📏 Rule: {len(rules)}개")
-                    
-                    # Input 정보
-                    for inp in inputs:
-                        input_expr = inp.find('.//dmn:text', dmn_ns)
-                        if input_expr is not None:
-                            rule_info.append(f"      - {input_expr.text}")
-                    
-                    # Output 정보
-                    for out in outputs:
-                        output_label = out.get('label', 'Output')
-                        rule_info.append(f"      - {output_label}")
-            
-            return rule_info
-            
-        except Exception as e:
-            logger.error("❌ 규칙 정보 추출 실패 | err=%s", str(e))
-            return ["   ⚠️ 규칙 정보 추출 실패"]
