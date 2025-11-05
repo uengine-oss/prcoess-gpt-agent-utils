@@ -225,7 +225,10 @@ class SafeToolLoader:
             raise
 
     def _load_mcp_tool(self, tool_name: str) -> List:
-        """MCP 도구 로드 (timeout & retry 지원)"""
+        """MCP 도구 로드 (timeout & retry 지원)
+        - transport: stdio (기본), websocket, sse
+        - command 미지정 시에도 예외 없이 건너뛰거나 다른 트랜스포트 사용
+        """
         logger.info("🔧 MCP 도구 로드 시작 | tool_name=%s", tool_name)
         self._apply_anyio_patch()
 
@@ -239,30 +242,40 @@ class SafeToolLoader:
         env_vars = os.environ.copy()
         env_vars.update(server_cfg.get("env", {}))
         timeout = server_cfg.get("timeout", 40)
+        # transport 우선순위: transport > type > url 스킴 추론 > 기본값(stdio)
+        transport = server_cfg.get("transport")
+        if not transport:
+            transport = server_cfg.get("type")
+        if not transport:
+            url_for_infer = server_cfg.get("url", "")
+            if isinstance(url_for_infer, str) and url_for_infer:
+                if url_for_infer.startswith("ws://") or url_for_infer.startswith("wss://"):
+                    transport = "websocket"
+                elif url_for_infer.startswith("http://") or url_for_infer.startswith("https://"):
+                    # HTTP 기반은 streamable-http로 취급
+                    transport = "streamable-http"
+        transport = str(transport or "stdio").lower()
 
         max_retries = 2
         retry_delay = 5
 
         for attempt in range(1, max_retries + 1):
             try:
-                cmd = server_cfg["command"]
-                if cmd == "npx":
-                    cmd = self._find_npx_command() or cmd
+                params = self._build_server_parameters(server_cfg=server_cfg, env_vars=env_vars, timeout=timeout)
+                if params is None:
+                    logger.warning("⚠️ MCP 서버 파라미터 구성 불가 → 스킵 | tool_name=%s transport=%s", tool_name, transport)
+                    return []
 
-                safe_args = [str(a) for a in server_cfg.get("args", [])]
-                safe_env = {k: str(v) for k, v in (env_vars or {}).items()}
+                logger.info("🚀 MCP 서버 시작 시도 %d/%d | tool_name=%s transport=%s", 
+                           attempt, max_retries, tool_name, transport)
 
-                logger.info("🚀 MCP 서버 시작 시도 %d/%d | tool_name=%s cmd=%s args=%s timeout=%d", 
-                           attempt, max_retries, tool_name, cmd, safe_args, timeout)
-
-                params = StdioServerParameters(
-                    command=str(cmd),
-                    args=safe_args,
-                    env=safe_env,
-                    timeout=int(timeout),
-                )
-
-                adapter = MCPServerAdapter(params)
+                # params가 dict이면 비-stdio 트랜스포트(websocket/sse/streamable-http)
+                if isinstance(params, dict):
+                    # crewai_tools.MCPServerAdapter는 최신 버전에서 dict 기반 설정을 허용합니다.
+                    adapter = MCPServerAdapter(params)
+                else:
+                    # stdio는 StdioServerParameters 객체를 그대로 전달
+                    adapter = MCPServerAdapter(params)
                 SafeToolLoader.adapters.append(adapter)
                 tool_names = [t.name for t in adapter.tools]
                 logger.info("✅ MCP 서버 연결 성공 | tool_name=%s tools_count=%d tool_names=%s", 
@@ -321,6 +334,84 @@ class SafeToolLoader:
         except Exception as e:
             logger.error("❌ MCP 설정 검색 실패 | tool_name=%s err=%s", tool_name, str(e), exc_info=True)
             raise
+
+    def _build_server_parameters(self, server_cfg: dict, env_vars: dict, timeout: int):
+        """전송 방식별 MCP 서버 파라미터 구성
+        지원: stdio (기본), websocket, sse
+        반환: MCP 어댑터가 수용 가능한 파라미터 객체 또는 None(구성 불가)
+        """
+        # transport 우선순위: transport > type > url 스킴 추론 > 기본값(stdio)
+        transport_value = server_cfg.get("transport") or server_cfg.get("type")
+        if not transport_value:
+            url_for_infer = server_cfg.get("url", "")
+            if isinstance(url_for_infer, str) and url_for_infer:
+                if url_for_infer.startswith("ws://") or url_for_infer.startswith("wss://"):
+                    transport_value = "websocket"
+                elif url_for_infer.startswith("http://") or url_for_infer.startswith("https://"):
+                    transport_value = "streamable-http"
+        transport = str(transport_value or "stdio").lower()
+
+        # STDIO
+        if transport in ("", "stdio", None):
+            cmd = server_cfg.get("command")
+            if not cmd:
+                logger.warning("⚠️ STDIO 트랜스포트에 command 누락 → 구성 불가")
+                return None
+            if cmd == "npx":
+                cmd = self._find_npx_command() or cmd
+            safe_args = [str(a) for a in server_cfg.get("args", [])]
+            safe_env = {k: str(v) for k, v in (env_vars or {}).items()}
+            return StdioServerParameters(
+                command=str(cmd),
+                args=safe_args,
+                env=safe_env,
+                timeout=int(timeout),
+            )
+
+        # WebSocket (mcp.client.websocket.websocket_client 사용)
+        if transport == "websocket":
+            url = server_cfg.get("url")
+            if not url:
+                logger.warning("⚠️ websocket 트랜스포트에 url 누락 → 구성 불가")
+                return None
+            headers = server_cfg.get("headers", {}) or {}
+            return {
+                "transport": "websocket",
+                "url": str(url),
+                "headers": {k: str(v) for k, v in headers.items()},
+                "timeout": int(timeout),
+            }
+
+        # Streamable HTTP: mcp.client.streamable_http.streamable-http_client 사용
+        if transport in ("streamable-http", "http"):
+            url = server_cfg.get("url")
+            if not url:
+                logger.warning("⚠️ streamable-http 트랜스포트에 url 누락 → 구성 불가")
+                return None
+            headers = server_cfg.get("headers", {}) or {}
+            return {
+                "transport": "streamable-http",
+                "url": str(url),
+                "headers": {k: str(v) for k, v in headers.items()},
+                "timeout": int(timeout),
+            }
+
+        # SSE (mcp.client.sse.sse_client 사용)
+        if transport == "sse":
+            url = server_cfg.get("url")
+            if not url:
+                logger.warning("⚠️ sse 트랜스포트에 url 누락 → 구성 불가")
+                return None
+            headers = server_cfg.get("headers", {}) or {}
+            return {
+                "transport": "sse",
+                "url": str(url),
+                "headers": {k: str(v) for k, v in headers.items()},
+                "timeout": int(timeout),
+            }
+
+        logger.warning("⚠️ 알 수 없는 transport=%s → 구성 불가", transport)
+        return None
 
     # ======================= [추가] A2A 헬퍼 ==========================
     def _load_a2a_tools(self, a2a_names: List[str], a2a_endpoints: Optional[Dict[str, Dict]] = None) -> List:

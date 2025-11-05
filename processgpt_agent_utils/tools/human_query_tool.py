@@ -128,6 +128,7 @@ class HumanQueryTool(BaseTool):
         try:
             save_event_sync(
                 job_id=job_id,
+                todo_id=self._task_id,
                 proc_inst_id=self._proc_inst_id,
                 crew_type=crew_type,
                 data=payload,
